@@ -1,5 +1,6 @@
 import argparse
 import html
+import json
 import re
 import time
 from collections import OrderedDict
@@ -23,7 +24,7 @@ SPECIAL_ED_TERMS = [
     "보완대체의사소통","AAC","의사소통지원","보조공학","접근성","학습접근성","읽기장애","난독",
     "긍정적행동지원","PBS","행동중재","문제행동","도전행동","위기행동","인권","인권지원단",
     "특수교육지원센터","치료지원","치료지원비","바우처","지원인력","특수교육실무원","보조인력",
-    "순회교육","순회교사","특수교육대상자 선정"
+    "순회교육","순회교사","특수교육대상자 선정","해외 특수교육", "미국 특수교육", "유럽 특수교육", "글로벌 특수교육"
 ]
 INCLUSION_TERMS = [
     "통합교육","통합학급","통합지원","통합수업","통합교육 지원","협력교수","협력수업",
@@ -33,12 +34,14 @@ INCLUSION_TERMS = [
 ]
 DIGITAL_TERMS = [
     "디지털교육","디지털 기반 교육","디지털교과서","AI 디지털교과서","AIDT","디지털 전환",
-    "에듀테크","교육용 앱","코스웨어","학습 플랫폼","LMS","학습분석","러닝애널리틱스",
+    "에듀테크","특수교육 에듀테크","장애인 에듀테크","교육용 앱","코스웨어","학습 플랫폼","LMS","학습분석","러닝애널리틱스",
     "UDL","보편적 학습 설계","보편적학습설계","학습자 접근성","웹접근성","정보접근성",
+    "장애인 디지털 접근성","디지털 접근성",
     "스크린리더","TTS","STT","자막","대체텍스트","키보드 접근","읽기 지원",
     "디지털 리터러시","미디어 리터러시","AI 리터러시","디지털 시민성","디지털 안전",
     "가짜뉴스","팩트체크","개인정보","프라이버시","저작권",
-    "수업혁신","블렌디드","원격수업","온라인수업","하이브리드","스마트기기","태블릿"
+    "수업혁신","블렌디드","원격수업","온라인수업","하이브리드","스마트기기","태블릿",
+    "해외 에듀테크", "미국 에듀테크", "유럽 에듀테크", "미국 디지털교육", "유럽 디지털교육", "글로벌 에듀테크"
 ]
 AI_TERMS = [
     "인공지능","AI","생성형 AI","생성형AI","LLM","대규모언어모델","챗GPT","ChatGPT",
@@ -49,15 +52,16 @@ AI_TERMS = [
 ]
 MUST_HAVE_TERMS = [
     "특수","통합","장애","IEP","AAC","UDL",
-    "디지털","디지털교과서","AIDT","에듀테크","리터러시",
+    "디지털","디지털교과서","AIDT","에듀테크","리터러시","접근성",
     "AI","인공지능","생성형","에이전트","에이전틱"
 ]
 
 KEYWORD_QUERIES = [
-    "특수교육 IEP","보완대체의사소통 AAC","특수교육지원센터 지원인력","긍정적행동지원 PBS",
-    "통합교육 협력교수","통합학급 장애학생 지원","합리적 편의 학교",
-    "AI 디지털교과서 AIDT","디지털 리터러시 교육","UDL 접근성 에듀테크","학습분석 LMS",
-    "에이전틱AI 교육","생성형 AI 교사 수업","AI 튜터 교육","AI 코스웨어"
+    "장애인 디지털 접근성", "특수교육 에듀테크", "특수교육 IEP", "보완대체의사소통 AAC",
+    "미국 특수교육 디지털", "유럽 장애인 접근성", "해외 특수교육 에듀테크", "글로벌 에듀테크 특수교육",
+    "통합교육 협력교수", "통합학급 장애학생 지원", "합리적 편의 학교",
+    "AI 디지털교과서 AIDT 특수", "디지털 리터러시 장애인", "UDL 접근성 에듀테크",
+    "에이전틱AI 교육", "생성형 AI 특수교육", "AI 튜터 특수교육", "AI 코스웨어 장애"
 ]
 
 PREFERRED_SOURCE_TERMS = [
@@ -383,9 +387,10 @@ def format_output(target_date: datetime, sections: Dict[str, List[NewsItem]], he
     return "\n".join(lines).rstrip() + "\n"
 
 
-def format_html_output(target_date: datetime, sections: Dict[str, List[NewsItem]], header_suffix: str) -> str:
+def format_html_output(target_date: datetime, sections: Dict[str, List[NewsItem]], header_suffix: str, text_content: str) -> str:
     page_title = f"{target_date.year:04d}년 {target_date.month:02d}월 {target_date.day:02d}일 뉴스 브리핑"
     header = f"{target_date.year:04d}년 {target_date.month:02d}월 {target_date.day:02d}일 {header_suffix}"
+    safe_text_content = json.dumps(text_content)
 
     section_blocks: List[str] = []
     for section in SECTION_ORDER:
@@ -451,22 +456,39 @@ def format_html_output(target_date: datetime, sections: Dict[str, List[NewsItem]
     .tags {{ display: flex; flex-wrap: wrap; gap: 8px; }}
     .tag {{ padding: 6px 10px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 13px; font-weight: 600; }}
     .empty {{ padding: 20px; border-radius: 16px; background: #ffffff; border: 1px dashed #cbd5e1; color: #64748b; }}
+    .copy-btn {{ display: block; width: 100%; padding: 18px; margin-bottom: 30px; background: #fee500; color: #191919; border: none; border-radius: 16px; font-size: 18px; font-weight: 800; cursor: pointer; text-align: center; box-shadow: 0 8px 16px rgba(254, 229, 0, 0.2); transition: transform 0.1s; }}
+    .copy-btn:active {{ transform: scale(0.98); }}
+    .copy-btn:hover {{ background: #ffd700; }}
   </style>
 </head>
 <body>
   <main class="container">
     <header class="hero">
-      <h1>{page_title}</h1>
-      <p>{header}</p>
+      <h1>{{page_title}}</h1>
+      <p>{{header}}</p>
     </header>
-    {sections_html}
+    
+    <button id="copyBtn" class="copy-btn">카카오톡 양식으로 전체 복사하기</button>
+
+    {{sections_html}}
   </main>
+  <script>
+    document.getElementById('copyBtn').addEventListener('click', function() {{
+      var text = {safe_text_content};
+      navigator.clipboard.writeText(text).then(function() {{
+        alert('카카오톡용 텍스트가 클립보드에 복사되었습니다. 바로 붙여넣기 하세요!');
+      }}).catch(function(err) {{
+        alert('복사에 실패했습니다. 브라우저 설정을 확인해주세요.');
+      }});
+    }});
+  </script>
 </body>
 </html>
 """.format(
         page_title=html.escape(page_title),
         header=html.escape(header),
         sections_html="\n".join(section_blocks),
+        safe_text_content=safe_text_content,
     )
 
 
@@ -507,7 +529,7 @@ def run() -> OutputPaths:
         collected = []
     sections = limit_news(collected, args.max_per_section, args.max_total)
     text_content = format_output(target_date, sections, args.header_suffix)
-    html_content = format_html_output(target_date, sections, args.header_suffix)
+    html_content = format_html_output(target_date, sections, args.header_suffix, text_content)
     text_path = write_output(args.out_dir, target_date, text_content)
     html_path = write_html_output(args.out_dir, target_date, html_content)
     index_path = write_latest_index(html_content)
