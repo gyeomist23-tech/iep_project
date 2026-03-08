@@ -3,7 +3,7 @@ import html
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import quote_plus
@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import feedparser
 import requests
+from dateutil import parser as date_parser
 
 
 SPECIAL_ED_TERMS = [
@@ -72,6 +73,7 @@ REQUEST_TIMEOUT = 20
 MAX_RETRIES = 3
 BACKOFF_SECONDS = [1, 2]
 USER_AGENT = "Mozilla/5.0 (compatible; DailyNewsBriefing/1.0; +https://github.com/)"
+DEFAULT_LOOKBACK_DAYS = 7
 
 
 @dataclass
@@ -89,6 +91,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", default="output")
     parser.add_argument("--header-suffix", default="디지털 기반 교육 관련 새소식을 전달해드립니다.")
     parser.add_argument("--timezone", default="Asia/Seoul")
+    parser.add_argument("--lookback-days", type=int, default=DEFAULT_LOOKBACK_DAYS)
     return parser.parse_args()
 
 
@@ -115,6 +118,38 @@ def normalize_link(entry: feedparser.FeedParserDict) -> str:
     if links:
         return normalize_text(links[0].get("href", ""))
     return ""
+
+
+def parse_entry_published_at(entry: feedparser.FeedParserDict, timezone_name: str) -> Optional[datetime]:
+    parsed_struct = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed_struct:
+        return datetime(*parsed_struct[:6], tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(timezone_name))
+
+    raw_value = entry.get("published") or entry.get("updated")
+    if not raw_value:
+        return None
+
+    try:
+        parsed_datetime = date_parser.parse(str(raw_value))
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+    if parsed_datetime.tzinfo is None:
+        parsed_datetime = parsed_datetime.replace(tzinfo=ZoneInfo("UTC"))
+    return parsed_datetime.astimezone(ZoneInfo(timezone_name))
+
+
+def is_within_lookback_window(
+    entry: feedparser.FeedParserDict,
+    reference_time: datetime,
+    lookback_days: int,
+    timezone_name: str,
+) -> bool:
+    published_at = parse_entry_published_at(entry, timezone_name)
+    if not published_at:
+        return False
+    earliest_allowed = reference_time - timedelta(days=lookback_days)
+    return earliest_allowed <= published_at <= reference_time
 
 
 def fetch_feed(url: str) -> feedparser.FeedParserDict:
@@ -159,7 +194,7 @@ def classify_item(title: str, summary: str) -> Optional[str]:
     return None
 
 
-def collect_news() -> List[NewsItem]:
+def collect_news(reference_time: datetime, lookback_days: int, timezone_name: str) -> List[NewsItem]:
     collected: List[NewsItem] = []
     seen_links = set()
 
@@ -179,6 +214,8 @@ def collect_news() -> List[NewsItem]:
             if link in seen_links:
                 continue
             if not is_candidate(title):
+                continue
+            if not is_within_lookback_window(entry, reference_time, lookback_days, timezone_name):
                 continue
             section = classify_item(title, summary)
             if not section:
@@ -245,7 +282,7 @@ def run() -> Path:
     args = parse_args()
     target_date = now_in_timezone(args.timezone)
     try:
-        collected = collect_news()
+        collected = collect_news(target_date, args.lookback_days, args.timezone)
     except Exception:
         collected = []
     sections = limit_news(collected, args.max_per_section, args.max_total)

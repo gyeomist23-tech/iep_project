@@ -2,7 +2,7 @@ name: Daily News Briefing
 
 on:
   schedule:
-    - cron: '30 22 * * *'
+    - cron: '30 22 * * 0'
   workflow_dispatch:
 
 permissions:
@@ -27,7 +27,14 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Generate daily news file
-        run: python src/news_briefing.py --max-per-section 3 --max-total 12
+        run: python src/news_briefing.py --max-per-section 3 --max-total 12 --lookback-days 7
+
+      - name: Upload generated txt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-news-txt
+          path: output/**/*.txt
+          if-no-files-found: warn
 
       - name: Commit and push changes
         run: |
