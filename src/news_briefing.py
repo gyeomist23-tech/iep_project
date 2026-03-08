@@ -1,5 +1,6 @@
 import argparse
 import html
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -59,6 +60,24 @@ KEYWORD_QUERIES = [
     "에이전틱AI 교육","생성형 AI 교사 수업","AI 튜터 교육","AI 코스웨어"
 ]
 
+PREFERRED_SOURCE_TERMS = [
+    "교육신문","교육플러스","한국교육신문","베리타스알파","대학저널","교수신문",
+    "한국대학신문","에듀동아","지디넷코리아","전자신문","조선일보","중앙일보",
+    "동아일보","한겨레","경향신문","한국일보","서울신문","국민일보","세계일보",
+    "매일경제","한국경제","머니투데이","연합뉴스","뉴스1","뉴시스","조선비즈",
+    "인스타그램","Instagram","Nature","ScienceDirect","Springer","Wiley","ERIC",
+    "Scopus","KCI","DBpia","RISS"
+]
+EXCLUDED_SOURCE_TERMS = [
+    "교육청","교육지원청","교육지원청","교육연수원","교육지원센터","교육지원단",
+    "도교육청","시교육청","교육지원국","교육지원과"
+]
+EXCLUDED_TITLE_TERMS = [
+    "교육청","교육지원청","교육지원청","교육지원센터 소식","교육청 보도자료"
+]
+KEYWORD_PRIORITY_TERMS = SPECIAL_ED_TERMS + INCLUSION_TERMS + DIGITAL_TERMS + AI_TERMS + MUST_HAVE_TERMS
+MAX_KEYWORDS_PER_ITEM = 5
+
 GOOGLE_NEWS_RSS_TEMPLATE = "https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR:ko"
 SECTION_ORDER = ["특수교육", "통합교육", "디지털교육", "인공지능"]
 SECTION_TERMS = OrderedDict(
@@ -73,7 +92,7 @@ REQUEST_TIMEOUT = 20
 MAX_RETRIES = 3
 BACKOFF_SECONDS = [1, 2]
 USER_AGENT = "Mozilla/5.0 (compatible; DailyNewsBriefing/1.0; +https://github.com/)"
-DEFAULT_LOOKBACK_DAYS = 7
+DEFAULT_LOOKBACK_DAYS = 28
 
 
 @dataclass
@@ -81,7 +100,16 @@ class NewsItem:
     title: str
     link: str
     summary: str
+    keywords: List[str]
+    source: str
     section: str
+
+
+@dataclass
+class OutputPaths:
+    text_path: Path
+    html_path: Path
+    index_path: Path
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,6 +136,33 @@ def normalize_text(value: Optional[str]) -> str:
         return ""
     cleaned = html.unescape(value)
     return " ".join(cleaned.split())
+
+
+def strip_html_tags(value: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", " ", value)
+    return normalize_text(without_tags)
+
+
+def extract_source_name(title: str, entry: feedparser.FeedParserDict) -> str:
+    source = entry.get("source", {})
+    if isinstance(source, dict):
+        source_title = normalize_text(source.get("title", ""))
+        if source_title:
+            return source_title
+    source_title = normalize_text(entry.get("source_title", ""))
+    if source_title:
+        return source_title
+    normalized_title = normalize_text(title)
+    if " - " in normalized_title:
+        return normalized_title.rsplit(" - ", 1)[-1]
+    return ""
+
+
+def clean_title_for_output(title: str, source_name: str) -> str:
+    normalized_title = normalize_text(title)
+    if source_name and normalized_title.endswith(f" - {source_name}"):
+        return normalized_title[: -(len(source_name) + 3)].strip()
+    return normalized_title
 
 
 def normalize_link(entry: feedparser.FeedParserDict) -> str:
@@ -176,6 +231,50 @@ def contains_any_term(text: str, terms: Iterable[str]) -> bool:
     return any(term.lower() in lowered for term in terms)
 
 
+def is_preferred_source(source_name: str) -> bool:
+    return contains_any_term(source_name, PREFERRED_SOURCE_TERMS)
+
+
+def is_education_office_source(source_name: str, title: str) -> bool:
+    return contains_any_term(source_name, EXCLUDED_SOURCE_TERMS) or contains_any_term(title, EXCLUDED_TITLE_TERMS)
+
+
+def sort_news_priority(items: List[NewsItem]) -> List[NewsItem]:
+    def priority(item: NewsItem) -> tuple[int, str]:
+        if is_preferred_source(item.source):
+            return (0, item.title)
+        if is_education_office_source(item.source, item.title):
+            return (1, item.title)
+        return (2, item.title)
+
+    return sorted(items, key=priority)
+
+
+def build_summary(title: str, summary: str) -> str:
+    normalized_summary = strip_html_tags(summary)
+    normalized_title = normalize_text(title)
+    if not normalized_summary:
+        return normalized_title
+    if normalized_summary.lower().startswith(normalized_title.lower()):
+        return normalized_summary
+    return f"{normalized_title} {normalized_summary}".strip()
+
+
+def build_keywords(title: str, summary: str, section: str, source_name: str) -> List[str]:
+    text = f"{normalize_text(title)} {normalize_text(summary)}"
+    found_keywords: List[str] = []
+    for term in KEYWORD_PRIORITY_TERMS:
+        if term not in found_keywords and term.lower() in text.lower():
+            found_keywords.append(term)
+        if len(found_keywords) >= MAX_KEYWORDS_PER_ITEM:
+            break
+    if section not in found_keywords:
+        found_keywords.insert(0, section)
+    if source_name and source_name not in found_keywords and len(found_keywords) < MAX_KEYWORDS_PER_ITEM:
+        found_keywords.append(source_name)
+    return found_keywords[:MAX_KEYWORDS_PER_ITEM]
+
+
 def is_candidate(title: str) -> bool:
     return contains_any_term(title, MUST_HAVE_TERMS) or any(
         contains_any_term(title, terms) for terms in SECTION_TERMS.values()
@@ -206,9 +305,11 @@ def collect_news(reference_time: datetime, lookback_days: int, timezone_name: st
             continue
 
         for entry in feed.entries:
-            title = normalize_text(entry.get("title", ""))
+            raw_title = normalize_text(entry.get("title", ""))
             summary = normalize_text(entry.get("summary", entry.get("description", "")))
             link = normalize_link(entry)
+            source_name = extract_source_name(raw_title, entry)
+            title = clean_title_for_output(raw_title, source_name)
             if not title or not link:
                 continue
             if link in seen_links:
@@ -220,8 +321,19 @@ def collect_news(reference_time: datetime, lookback_days: int, timezone_name: st
             section = classify_item(title, summary)
             if not section:
                 continue
+            item_summary = build_summary(title, summary)
+            item_keywords = build_keywords(title, item_summary, section, source_name)
             seen_links.add(link)
-            collected.append(NewsItem(title=title, link=link, summary=summary, section=section))
+            collected.append(
+                NewsItem(
+                    title=title,
+                    link=link,
+                    summary=item_summary,
+                    keywords=item_keywords,
+                    source=source_name,
+                    section=section,
+                )
+            )
 
     return collected
 
@@ -229,7 +341,9 @@ def collect_news(reference_time: datetime, lookback_days: int, timezone_name: st
 def limit_news(items: List[NewsItem], max_per_section: int, max_total: int) -> Dict[str, List[NewsItem]]:
     limited_by_section: Dict[str, List[NewsItem]] = {section: [] for section in SECTION_ORDER}
 
-    for item in items:
+    prioritized_items = sort_news_priority(items)
+
+    for item in prioritized_items:
         bucket = limited_by_section[item.section]
         if len(bucket) < max_per_section:
             bucket.append(item)
@@ -260,11 +374,100 @@ def format_output(target_date: datetime, sections: Dict[str, List[NewsItem]], he
         for index, item in enumerate(sections[section]):
             lines.append(f"제목 : {item.title}")
             lines.append(f"링크 : {item.link}")
+            lines.append(f"요약 : {item.summary}")
+            lines.append(f"키워드 : {', '.join(item.keywords)}")
             if index != len(sections[section]) - 1:
                 lines.append("")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def format_html_output(target_date: datetime, sections: Dict[str, List[NewsItem]], header_suffix: str) -> str:
+    page_title = f"{target_date.year:04d}년 {target_date.month:02d}월 {target_date.day:02d}일 뉴스 브리핑"
+    header = f"{target_date.year:04d}년 {target_date.month:02d}월 {target_date.day:02d}일 {header_suffix}"
+
+    section_blocks: List[str] = []
+    for section in SECTION_ORDER:
+        items = sections.get(section, [])
+        if not items:
+            body = '<div class="empty">(없음)</div>'
+        else:
+            cards: List[str] = []
+            for item in items:
+                keywords = "".join(
+                    f'<span class="tag">{html.escape(keyword)}</span>' for keyword in item.keywords
+                )
+                source_html = ""
+                if item.source:
+                    source_html = f'<div class="meta">출처: {html.escape(item.source)}</div>'
+                cards.append(
+                    "\n".join(
+                        [
+                            '<article class="card">',
+                            f'  <h3>{html.escape(item.title)}</h3>',
+                            f'  <a class="link" href="{html.escape(item.link)}" target="_blank" rel="noopener noreferrer">기사 바로가기</a>',
+                            source_html,
+                            f'  <p class="summary">{html.escape(item.summary)}</p>',
+                            f'  <div class="tags">{keywords}</div>',
+                            '</article>',
+                        ]
+                    )
+                )
+            body = "\n".join(cards)
+        section_blocks.append(
+            "\n".join(
+                [
+                    '<section class="section">',
+                    f'  <h2>{html.escape(section)}</h2>',
+                    f'  <div class="section-body">{body}</div>',
+                    '</section>',
+                ]
+            )
+        )
+
+    return """<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{page_title}</title>
+  <style>
+    :root {{ color-scheme: light; }}
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f7fb; color: #1f2937; }}
+    .container {{ max-width: 980px; margin: 0 auto; padding: 40px 20px 64px; }}
+    .hero {{ margin-bottom: 28px; padding: 28px; border-radius: 20px; background: linear-gradient(135deg, #2563eb, #7c3aed); color: white; box-shadow: 0 18px 40px rgba(37, 99, 235, 0.18); }}
+    .hero h1 {{ margin: 0 0 8px; font-size: 32px; line-height: 1.3; }}
+    .hero p {{ margin: 0; opacity: 0.92; }}
+    .section {{ margin-bottom: 24px; }}
+    .section h2 {{ margin: 0 0 12px; font-size: 24px; }}
+    .section-body {{ display: grid; gap: 14px; }}
+    .card {{ background: #ffffff; border-radius: 18px; padding: 20px; box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08); border: 1px solid #e5e7eb; }}
+    .card h3 {{ margin: 0 0 10px; font-size: 20px; line-height: 1.5; }}
+    .link {{ display: inline-block; margin-bottom: 10px; color: #2563eb; text-decoration: none; font-weight: 600; }}
+    .link:hover {{ text-decoration: underline; }}
+    .meta {{ margin-bottom: 10px; color: #6b7280; font-size: 14px; }}
+    .summary {{ margin: 0 0 12px; line-height: 1.7; color: #374151; }}
+    .tags {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .tag {{ padding: 6px 10px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 13px; font-weight: 600; }}
+    .empty {{ padding: 20px; border-radius: 16px; background: #ffffff; border: 1px dashed #cbd5e1; color: #64748b; }}
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <h1>{page_title}</h1>
+      <p>{header}</p>
+    </header>
+    {sections_html}
+  </main>
+</body>
+</html>
+""".format(
+        page_title=html.escape(page_title),
+        header=html.escape(header),
+        sections_html="\n".join(section_blocks),
+    )
 
 
 def write_output(base_dir: str, target_date: datetime, content: str) -> Path:
@@ -278,7 +481,24 @@ def write_output(base_dir: str, target_date: datetime, content: str) -> Path:
     return output_path
 
 
-def run() -> Path:
+def write_html_output(base_dir: str, target_date: datetime, content: str) -> Path:
+    year = f"{target_date.year:04d}"
+    month = f"{target_date.month:02d}"
+    out_dir = Path(base_dir) / year / month
+    out_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"daily_news_{target_date.year:04d}{target_date.month:02d}{target_date.day:02d}.html"
+    output_path = out_dir / filename
+    output_path.write_text(content, encoding="utf-8")
+    return output_path
+
+
+def write_latest_index(content: str) -> Path:
+    output_path = Path("index.html")
+    output_path.write_text(content, encoding="utf-8")
+    return output_path
+
+
+def run() -> OutputPaths:
     args = parse_args()
     target_date = now_in_timezone(args.timezone)
     try:
@@ -286,10 +506,16 @@ def run() -> Path:
     except Exception:
         collected = []
     sections = limit_news(collected, args.max_per_section, args.max_total)
-    content = format_output(target_date, sections, args.header_suffix)
-    return write_output(args.out_dir, target_date, content)
+    text_content = format_output(target_date, sections, args.header_suffix)
+    html_content = format_html_output(target_date, sections, args.header_suffix)
+    text_path = write_output(args.out_dir, target_date, text_content)
+    html_path = write_html_output(args.out_dir, target_date, html_content)
+    index_path = write_latest_index(html_content)
+    return OutputPaths(text_path=text_path, html_path=html_path, index_path=index_path)
 
 
 if __name__ == "__main__":
-    output_path = run()
-    print(output_path)
+    output_paths = run()
+    print(output_paths.text_path)
+    print(output_paths.html_path)
+    print(output_paths.index_path)

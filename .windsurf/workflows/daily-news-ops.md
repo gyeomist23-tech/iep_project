@@ -19,15 +19,19 @@ description: Daily news briefing generation, verification, and GitHub Actions ma
    - `. .venv/bin/activate`
    - `python -m pip install -r requirements.txt`
    - 아래 명령으로 스크립트를 실행한다.
-   - `python src/news_briefing.py --max-per-section 3 --max-total 12 --lookback-days 7`
+   - `python src/news_briefing.py --max-per-section 3 --max-total 12 --lookback-days 28`
    - 생성된 `output/YYYY/MM/daily_news_YYYYMMDD.txt` 파일을 열어 포맷을 확인한다.
+   - 생성된 `output/YYYY/MM/daily_news_YYYYMMDD.html` 과 루트 `index.html` 을 브라우저로 열어 사이트 형태를 확인한다.
 
 4. 포맷 검토
    - 헤더 문구가 정확한지 확인한다.
    - 섹션 순서가 `[특수교육]`, `[통합교육]`, `[디지털교육]`, `[인공지능]` 인지 확인한다.
-   - 실행 시점 기준 최근 7일 이내 기사만 포함되는지 확인한다.
+   - 실행 시점 기준 최근 28일 이내 기사만 포함되는지 확인한다.
+   - 교육청/교육지원청 기사도 포함될 수 있으나 선호 출처가 우선 배치되는지 확인한다.
+   - 교육 전문지, 메이저 언론, 학술지 계열 출처가 우선 반영되는지 확인한다.
    - 기사 없는 섹션이 `(없음)` 으로 표시되는지 확인한다.
-   - 각 기사 항목이 두 줄 형식을 지키는지 확인한다.
+   - 각 기사 항목에 `제목`, `링크`, `요약`, `키워드`가 출력되는지 확인한다.
+   - HTML에서도 같은 기사 정보가 카드 형태로 보이는지 확인한다.
 
 5. 자동화 검토
    - GitHub Actions의 cron이 `30 22 * * *` 인지 확인한다.
